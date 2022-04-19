@@ -36,7 +36,7 @@ from nnunet.network_architecture.neural_network import SegmentationNetwork
 from nnunet.postprocessing.connected_components import determine_postprocessing
 from nnunet.training.data_augmentation.default_data_augmentation import default_3D_augmentation_params, \
     default_2D_augmentation_params, get_default_augmentation, get_patch_size
-from nnunet.training.dataloading.dataset_loading import load_dataset, DataLoader3D, DataLoader2D, unpack_dataset
+from nnunet.training.dataloading.dataset_loading import DataLoader2D_forunlabel, DataLoader3D_forunlabel, load_dataset, DataLoader3D, DataLoader2D, unpack_dataset, load_unlabel_dataset
 from nnunet.training.loss_functions.dice_loss import DC_and_CE_loss
 from nnunet.training.network_training.network_trainer import NetworkTrainer
 from nnunet.utilities.nd_softmax import softmax_helper
@@ -393,6 +393,7 @@ class nnUNetTrainer(NetworkTrainer):
 
     def load_dataset(self):
         self.dataset = load_dataset(self.folder_with_preprocessed_data)
+        self.dataset_unlabelled = load_unlabel_dataset(self.folder_with_preprocessed_data)
 
     def get_basic_generators(self):
         self.load_dataset()
@@ -405,11 +406,17 @@ class nnUNetTrainer(NetworkTrainer):
             dl_val = DataLoader3D(self.dataset_val, self.patch_size, self.patch_size, self.batch_size, False,
                                   oversample_foreground_percent=self.oversample_foreground_percent,
                                   pad_mode="constant", pad_sides=self.pad_all_sides, memmap_mode='r')
+            self.dl_un = DataLoader3D_forunlabel(self.dataset_unlabelled, self.patch_size, self.patch_size, self.batch_size, False,
+                                  oversample_foreground_percent=self.oversample_foreground_percent,
+                                  pad_mode="constant", pad_sides=self.pad_all_sides, memmap_mode='r')
         else:
             dl_tr = DataLoader2D(self.dataset_tr, self.basic_generator_patch_size, self.patch_size, self.batch_size,
                                  oversample_foreground_percent=self.oversample_foreground_percent,
                                  pad_mode="constant", pad_sides=self.pad_all_sides, memmap_mode='r')
             dl_val = DataLoader2D(self.dataset_val, self.patch_size, self.patch_size, self.batch_size,
+                                  oversample_foreground_percent=self.oversample_foreground_percent,
+                                  pad_mode="constant", pad_sides=self.pad_all_sides, memmap_mode='r')
+            self.dl_un = DataLoader2D_forunlabel(self.dataset_unlabelled, self.patch_size, self.patch_size, self.batch_size,
                                   oversample_foreground_percent=self.oversample_foreground_percent,
                                   pad_mode="constant", pad_sides=self.pad_all_sides, memmap_mode='r')
         return dl_tr, dl_val
