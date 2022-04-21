@@ -38,7 +38,7 @@ from batchgenerators.utilities.file_and_folder_operations import *
 from torch.nn import functional as F
 
 
-class nnUNetTrainerV2(nnUNetTrainer):
+class nnUNetTrainerSemi(nnUNetTrainer):
     """
     Info for Fabian: same as internal nnUNetTrainerV2_2
     """
@@ -105,7 +105,7 @@ class nnUNetTrainerV2(nnUNetTrainer):
                         "will wait all winter for your model to finish!")
 
                 self.tr_gen, self.val_gen, self.un_gen = get_moreDA_augmentation(
-                    self.dl_tr, self.dl_val, self.dl_un,
+                    self.dl_tr, self.dl_val, None,
                     self.data_aug_params[
                         'patch_size_for_spatialtransform'],
                     self.data_aug_params,

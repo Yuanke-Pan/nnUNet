@@ -14,6 +14,7 @@
 
 
 from collections import OrderedDict
+from enum import auto
 from typing import Tuple
 
 import numpy as np
@@ -34,6 +35,7 @@ from torch import nn
 from torch.cuda.amp import autocast
 from nnunet.training.learning_rate.poly_lr import poly_lr
 from batchgenerators.utilities.file_and_folder_operations import *
+from torch.nn import functional as F
 
 
 class nnUNetTrainerV2(nnUNetTrainer):
@@ -93,6 +95,10 @@ class nnUNetTrainerV2(nnUNetTrainer):
                                                       "_stage%d" % self.stage)
             if training:
                 self.dl_tr, self.dl_val = self.get_basic_generators()
+                # this step is fine
+
+
+
                 if self.unpack_data:
                     print("unpacking dataset")
                     unpack_dataset(self.folder_with_preprocessed_data)
@@ -101,9 +107,9 @@ class nnUNetTrainerV2(nnUNetTrainer):
                     print(
                         "INFO: Not unpacking data! Training may be slow due to that. Pray you are not using 2d or you "
                         "will wait all winter for your model to finish!")
-
-                self.tr_gen, self.val_gen = get_moreDA_augmentation(
-                    self.dl_tr, self.dl_val,
+                # The step below have problem
+                self.tr_gen, self.val_gen, self.un_gen = get_moreDA_augmentation(
+                    self.dl_tr, self.dl_val, self.dataset_unlabelled,
                     self.data_aug_params[
                         'patch_size_for_spatialtransform'],
                     self.data_aug_params,
@@ -111,10 +117,14 @@ class nnUNetTrainerV2(nnUNetTrainer):
                     pin_memory=self.pin_memory,
                     use_nondetMultiThreadedAugmenter=False
                 )
+                data = next(self.val_gen)
+                print(data)
+                print("DA Done!")
                 self.print_to_log_file("TRAINING KEYS:\n %s" % (str(self.dataset_tr.keys())),
                                        also_print_to_console=False)
                 self.print_to_log_file("VALIDATION KEYS:\n %s" % (str(self.dataset_val.keys())),
                                        also_print_to_console=False)
+
             else:
                 pass
 
@@ -157,13 +167,22 @@ class nnUNetTrainerV2(nnUNetTrainer):
                                     dropout_op_kwargs,
                                     net_nonlin, net_nonlin_kwargs, True, False, lambda x: x, InitWeights_He(1e-2),
                                     self.net_num_pool_op_kernel_sizes, self.net_conv_kernel_sizes, False, True, True)
+        self.student = Generic_UNet(self.num_input_channels, self.base_num_features, self.num_classes,
+                                    len(self.net_num_pool_op_kernel_sizes),
+                                    self.conv_per_stage, 2, conv_op, norm_op, norm_op_kwargs, dropout_op,
+                                    dropout_op_kwargs,
+                                    net_nonlin, net_nonlin_kwargs, True, False, lambda x: x, InitWeights_He(1e-2),
+                                    self.net_num_pool_op_kernel_sizes, self.net_conv_kernel_sizes, False, True, True)
         if torch.cuda.is_available():
             self.network.cuda()
+            self.student.cuda()
         self.network.inference_apply_nonlin = softmax_helper
 
     def initialize_optimizer_and_scheduler(self):
         assert self.network is not None, "self.initialize_network must be called first"
         self.optimizer = torch.optim.SGD(self.network.parameters(), self.initial_lr, weight_decay=self.weight_decay,
+                                         momentum=0.99, nesterov=True)
+        self.student_optimizer = torch.optim.SGD(self.student.parameters(), self.initial_lr, weight_decay=self.weight_decay,
                                          momentum=0.99, nesterov=True)
         self.lr_scheduler = None
 
@@ -220,7 +239,103 @@ class nnUNetTrainerV2(nnUNetTrainer):
         self.network.do_ds = ds
         return ret
 
-    def run_iteration(self, data_generator, do_backprop=True, run_online_evaluation=False):
+
+    # training loop
+    def run_training(self):
+        if not torch.cuda.is_available():
+            self.print_to_log_file("WARNING!!! You are attempting to run training on a CPU (torch.cuda.is_available() is False). This can be VERY slow!")
+
+        _ = self.tr_gen.next()
+
+        _ = self.val_gen.next()
+        _ = self.un_gen.next()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        self._maybe_init_amp()
+
+        maybe_mkdir_p(self.output_folder)        
+        self.plot_network_architecture()
+
+        if cudnn.benchmark and cudnn.deterministic:
+            warn("torch.backends.cudnn.deterministic is True indicating a deterministic training is desired. "
+                 "But torch.backends.cudnn.benchmark is True as well and this will prevent deterministic training! "
+                 "If you want deterministic then set benchmark=False")
+
+        if not self.was_initialized:
+            self.initialize(True)
+
+        while self.epoch < self.max_num_epochs:
+            self.print_to_log_file("\nepoch: ", self.epoch)
+            epoch_start_time = time()
+            train_losses_epoch = []
+
+            # train one epoch
+            self.network.train()
+
+            if self.use_progress_bar:
+                with trange(self.num_batches_per_epoch) as tbar:
+                    for b in tbar:
+                        tbar.set_description("Epoch {}/{}".format(self.epoch+1, self.max_num_epochs))
+
+                        l = self.run_iteration(self.tr_gen, self.un_gen, True)
+
+                        tbar.set_postfix(loss=l)
+                        train_losses_epoch.append(l)
+            else:
+                for _ in range(self.num_batches_per_epoch):
+                    l = self.run_iteration(self.tr_gen, True)
+                    train_losses_epoch.append(l)
+
+            self.all_tr_losses.append(np.mean(train_losses_epoch))
+            self.print_to_log_file("train loss : %.4f" % self.all_tr_losses[-1])
+
+            with torch.no_grad():
+                # validation with train=False
+                self.network.eval()
+                val_losses = []
+                for b in range(self.num_val_batches_per_epoch):
+                    l = self.run_iteration(self.val_gen, False, True)
+                    val_losses.append(l)
+                self.all_val_losses.append(np.mean(val_losses))
+                self.print_to_log_file("validation loss: %.4f" % self.all_val_losses[-1])
+
+                if self.also_val_in_tr_mode:
+                    self.network.train()
+                    # validation with train=True
+                    val_losses = []
+                    for b in range(self.num_val_batches_per_epoch):
+                        l = self.run_iteration(self.val_gen, False)
+                        val_losses.append(l)
+                    self.all_val_losses_tr_mode.append(np.mean(val_losses))
+                    self.print_to_log_file("validation loss (train=True): %.4f" % self.all_val_losses_tr_mode[-1])
+
+            self.update_train_loss_MA()  # needed for lr scheduler and stopping of training
+
+            continue_training = self.on_epoch_end()
+
+            epoch_end_time = time()
+
+            if not continue_training:
+                # allows for early stopping
+                break
+
+            self.epoch += 1
+            self.print_to_log_file("This epoch took %f s\n" % (epoch_end_time - epoch_start_time))
+
+        self.epoch -= 1  # if we don't do this we can get a problem with loading model_final_checkpoint.
+
+        if self.save_final_checkpoint: self.save_checkpoint(join(self.output_folder, "model_final_checkpoint.model"))
+        # now we can delete latest as it will be identical with final
+        if isfile(join(self.output_folder, "model_latest.model")):
+            os.remove(join(self.output_folder, "model_latest.model"))
+        if isfile(join(self.output_folder, "model_latest.model.pkl")):
+            os.remove(join(self.output_folder, "model_latest.model.pkl"))
+    
+
+
+    def run_iteration(self, data_generator, unlabel_generator, do_backprop=True, run_online_evaluation=False):
         """
         gradient clipping improves training stability
 
@@ -232,44 +347,120 @@ class nnUNetTrainerV2(nnUNetTrainer):
         data_dict = next(data_generator)
         data = data_dict['data']
         target = data_dict['target']
-
+        unlabel_dict = next(unlabel_generator)
+        unlabel_A_data = unlabel_dict['data']
+        unlabel_data = unlabel_dict['target']
         data = maybe_to_torch(data)
         target = maybe_to_torch(target)
-
+        unlabel_A_data = maybe_to_torch(unlabel_A_data)
+        unlabel_data = maybe_to_torch(unlabel_data)
         if torch.cuda.is_available():
             data = to_cuda(data)
             target = to_cuda(target)
+            unlabel_A_data = to_cuda(unlabel_A_data)
+            unlabel_data = to_cuda(unlabel_data)
 
         self.optimizer.zero_grad()
+        self.student_optimizer.zero_grad()
 
         if self.fp16:
             with autocast():
-                output = self.network(data)
-                del data
-                l = self.loss(output, target)
+                batch_size = data.shape[0]
+                t_images = torch.cat((data, unlabel_A_data, unlabel_data))
+                t_output = self.network(t_images)
+                t_logit_l = t_output[:batch_size]
+                t_logit_uw, t_logit_us = t_output[batch_size:].chunk(2)
+                del t_images
+                #del t_output
+                t_loss_l = self.loss(t_logit_l, target)
+                soft_pseudo_label = torch.softmax(t_logit_uw.detach(), dim=-1)
+                max_probs, hard_pseudo_label = torch.max(soft_pseudo_label, dim=-1)
+                mask = max_probs.ge(0.8).float()
+                t_loss_u = torch.mean(-(soft_pseudo_label * torch.log_softmax(t_logit_us, dim=-1)).sum(dim=-1) * mask)
+                weight_u = 1
+                t_loss_uda = t_loss_l + t_loss_u * weight_u
+
+                s_image = torch.cat((data, unlabel_data))
+                s_logits = self.student(s_image)
+                s_logits_l = s_logits[:batch_size]
+                s_logits_us = s_logits[batch_size:]
+                del s_image
+                del s_logits
+
+                s_loss_l_old = F.cross_entropy(s_logits_l.detach(), target)
+                s_loss = self.loss(s_logits_us, hard_pseudo_label)
+
+            self.s_scaler.scale(s_loss).backward()
+            self.s_scaler.unscale_(self.student_optimizer)
+            torch.nn.utils.clip_grad_norm_(self.student.parameters(), 12)
+            self.s_scaler.step(self.student_optimizer)
+            self.s_scaler.update()
+
+            with autocast():
+                with torch.no_grad():
+                    s_logits_l = self.student(data)
+                s_loss_new = F.cross_entropy(s_logits_l.detach(), target)
+                dot_product = s_loss_l_old - s_loss_new
+
+                _, hard_pseudo_label = torch.max(t_logit_us.detach(), dim=-1)
+                t_loss_mpl = dot_product * F.cross_entropy(t_logit_us, hard_pseudo_label)
+                t_loss = t_loss_uda + t_loss_mpl
+                # wait to modify
 
             if do_backprop:
-                self.amp_grad_scaler.scale(l).backward()
+                self.amp_grad_scaler.scale(t_loss).backward()
                 self.amp_grad_scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
                 self.amp_grad_scaler.step(self.optimizer)
                 self.amp_grad_scaler.update()
         else:
-            output = self.network(data)
-            del data
-            l = self.loss(output, target)
+            batch_size = data.shape[0]
+            t_images = torch.cat((data, unlabel_A_data, unlabel_data))
+            t_output = self.network(t_images)
+            t_logit_l = t_output[:batch_size]
+            t_logit_uw, t_logit_us = t_output[batch_size:].chunk(2)
+            del t_images
+            #del t_output
+            t_loss_l = self.loss(t_logit_l, target)
+            soft_pseudo_label = torch.softmax(t_logit_uw.detach(), dim=-1)
+            max_probs, hard_pseudo_label = torch.max(soft_pseudo_label, dim=-1)
+            mask = max_probs.ge(0.8).float()
+            t_loss_u = torch.mean(-(soft_pseudo_label * torch.log_softmax(t_logit_us, dim=-1)).sum(dim=-1) * mask)
+            weight_u = 1
+            t_loss_uda = t_loss_l + t_loss_u * weight_u
+            s_image = torch.cat((data, unlabel_data))
+            s_logits = self.student(s_image)
+            s_logits_l = s_logits[:batch_size]
+            s_logits_us = s_logits[batch_size:]
+            del s_image
+            del s_logits
+            s_loss_l_old = F.cross_entropy(s_logits_l.detach(), target)
+            s_loss = self.loss(s_logits_us, hard_pseudo_label)
+
+            s_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.student.parameters(), 12)
+            self.student_optimizer.step()
+            with torch.no_grad():
+                s_logits_l = self.student(data)
+            s_loss_new = F.cross_entropy(s_logits_l.detach(), target)
+            dot_product = s_loss_l_old - s_loss_new
+
+            _, hard_pseudo_label = torch.max(t_logit_us.detach(), dim=-1)
+            t_loss_mpl = dot_product * F.cross_entropy(t_logit_us, hard_pseudo_label)
+            t_loss = t_loss_uda + t_loss_mpl
+            # wait to modify
 
             if do_backprop:
-                l.backward()
+                t_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
                 self.optimizer.step()
 
         if run_online_evaluation:
-            self.run_online_evaluation(output, target)
+            self.run_online_evaluation(t_output, target)
 
         del target
-
-        return l.detach().cpu().numpy()
+        del t_output
+        return t_loss.detach().cpu().numpy()
 
     def do_split(self):
         """

@@ -89,7 +89,7 @@ def delete_npy(folder):
 def load_dataset(folder, num_cases_properties_loading_threshold=1000):
     # we don't load the actual data but instead return the filename to the np file.
     print('loading dataset')
-    case_identifiers = [i[:-4] for i in os.listdir(folder) if i.endswith("npz") and (i.find("segFromPrevStage") == -1) and not i.beginswith("Case")]
+    case_identifiers = [i[:-4] for i in os.listdir(folder) if i.endswith("npz") and (i.find("segFromPrevStage") == -1) and not i.startswith("Case")]
     case_identifiers.sort()
     dataset = OrderedDict()
     for c in case_identifiers:
@@ -112,7 +112,7 @@ def load_dataset(folder, num_cases_properties_loading_threshold=1000):
 def load_unlabel_dataset(folder, num_cases_properties_loading_threshold=1000):
     # we don't load the actual data but instead return the filename to the np file.
     print('loading dataset')
-    case_identifiers = [i[:-4] for i in os.listdir(folder) if i.endswith("npz") and (i.find("segFromPrevStage") == -1) and i.beginswith("Case")]
+    case_identifiers = [i[:-4] for i in os.listdir(folder) if i.endswith("npz") and (i.find("segFromPrevStage") == -1) and i.startswith("Case")]
     case_identifiers.sort()
     dataset = OrderedDict()
     for c in case_identifiers:
@@ -429,7 +429,7 @@ class DataLoader3D_forunlabel(SlimDataLoaderBase):
         :param random: Sample keys randomly; CAREFUL! non-random sampling requires batch_size=1, otherwise you will iterate batch_size times over the dataset
         :param oversample_foreground: half the batch will be forced to contain at least some foreground (equal prob for each of the foreground classes)
         """
-        super(DataLoader3D, self).__init__(data, batch_size, None)
+        super(DataLoader3D_forunlabel, self).__init__(data, batch_size, None)
         if pad_kwargs_data is None:
             pad_kwargs_data = OrderedDict()
         self.pad_kwargs_data = pad_kwargs_data
@@ -871,7 +871,7 @@ class DataLoader2D_forunlabel(SlimDataLoaderBase):
         :param random: sample randomly; CAREFUL! non-random sampling requires batch_size=1, otherwise you will iterate batch_size times over the dataset
         :param pseudo_3d_slices: 7 = 3 below and 3 above the center slice
         """
-        super(DataLoader2D, self).__init__(data, batch_size, None)
+        super(DataLoader2D_forunlabel, self).__init__(data, batch_size, None)
         if pad_kwargs_data is None:
             pad_kwargs_data = OrderedDict()
         self.pad_kwargs_data = pad_kwargs_data

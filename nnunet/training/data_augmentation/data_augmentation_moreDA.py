@@ -23,7 +23,7 @@ from batchgenerators.transforms.noise_transforms import GaussianNoiseTransform, 
 from batchgenerators.transforms.resample_transforms import SimulateLowResolutionTransform
 from batchgenerators.transforms.spatial_transforms import SpatialTransform, MirrorTransform
 from batchgenerators.transforms.utility_transforms import RemoveLabelTransform, RenameTransform, NumpyToTensor
-
+from nnunet.training.data_augmentation.unlabelAD import SpatialTransformUA
 from nnunet.training.data_augmentation.custom_transforms import Convert3DTo2DTransform, Convert2DTo3DTransform, \
     MaskTransform, ConvertSegmentationToRegionsTransform
 from nnunet.training.data_augmentation.default_data_augmentation import default_3D_augmentation_params
@@ -204,7 +204,7 @@ def get_moreDA_augmentation(dataloader_train, dataloader_val, dataloader_un, pat
                                                     params.get("num_cached_per_thread"),
                                                     seeds=seeds_val, pin_memory=pin_memory)
     # batchgenerator_val = SingleThreadedAugmenter(dataloader_val, val_transforms)
-
+    print("regular done!")
     # wait for unlabel transform
     unlabel_transforms = []
     if params.get("selected_data_channels") is not None:
@@ -222,7 +222,7 @@ def get_moreDA_augmentation(dataloader_train, dataloader_val, dataloader_un, pat
         patch_size_spatial = patch_size
         ignore_axes = None
 
-    unlabel_transforms.append(SpatialTransform(
+    unlabel_transforms.append(SpatialTransformUA(
         patch_size_spatial, patch_center_dist_from_border=None,
         do_elastic_deform=params.get("do_elastic"), alpha=params.get("elastic_deform_alpha"),
         sigma=params.get("elastic_deform_sigma"),
@@ -233,7 +233,7 @@ def get_moreDA_augmentation(dataloader_train, dataloader_val, dataloader_un, pat
         border_mode_seg="constant", border_cval_seg=border_val_seg,
         order_seg=order_seg, random_crop=params.get("random_crop"), p_el_per_sample=params.get("p_eldef"),
         p_scale_per_sample=params.get("p_scale"), p_rot_per_sample=params.get("p_rot"),
-        independent_scale_for_each_axis=params.get("independent_scale_factor_for_each_axis")
+        independent_scale_for_each_axis=params.get("independent_scale_factor_for_each_axis"),
     ))
 
     if params.get("dummy_2D"):
@@ -299,18 +299,18 @@ def get_moreDA_augmentation(dataloader_train, dataloader_val, dataloader_un, pat
     unlabel_transforms.append(RenameTransform('seg', 'target', True))
 
 #    if regions is not None:
-#        tr_transforms.append(ConvertSegmentationToRegionsTransform(regions, 'target', 'target'))
-
+#        unlabel_transforms.append(ConvertSegmentationToRegionsTransform(regions, 'target', 'target'))
 #    if deep_supervision_scales is not None:
 #        if soft_ds:
 #            assert classes is not None
-#            tr_transforms.append(DownsampleSegForDSTransform3(deep_supervision_scales, 'target', 'target', classes))
+#            unlabel_transforms.append(DownsampleSegForDSTransform3(deep_supervision_scales, 'target', 'target', classes))
 #        else:
-#            tr_transforms.append(DownsampleSegForDSTransform2(deep_supervision_scales, 0, input_key='target',
+#            unlabel_transforms.append(DownsampleSegForDSTransform2(deep_supervision_scales, 0, input_key='target',
 #                                                              output_key='target'))
 
     unlabel_transforms.append(NumpyToTensor(['data', 'target'], 'float'))
-    unlabel_transforms = Compose(tr_transforms)
+    unlabel_transforms = Compose(unlabel_transforms)
+
 
     if use_nondetMultiThreadedAugmenter:
         if NonDetMultiThreadedAugmenter is None:
